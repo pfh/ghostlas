@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<meta charset="UTF-8">
+<title>Ghost Atlas (ghostlas)</title>
+<style>
+body {
+   font-family: sans-serif;
+   margin: 0;
+}
+</style>
+
+<canvas id="plot" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%;"></canvas>
+
+<div style="position: absolute; top: 0; left: 0; width: 100%; height: 125%;">
+<div style="position: relative; height: 100%;">
+    <div style="position: absolute; right: 0">
+        <a href="https://github.com/pfh/ghostlas"><img width="149" height="149" src="https://github.blog/wp-content/uploads/2008/12/forkme_right_gray_6d6d6d.png?resize=149%2C149" class="attachment-full size-full" alt="Fork me on GitHub" data-recalc-dims="1"></a>
+    </div>
+
+<textarea id="code" spellcheck="false" style="height: 20%; width: 33%; padding: 0.5em;">
+lookahead 1
+angles 6
+rotations yes
+mirrors no
+edge 1
+edge Aa
+edge Bb mirror
+tile B+b+B+b+1+1
+tile 1++1+1++1
+</textarea>
+<p>
+<input id="button1" type="submit" value="Start" 
+    onclick="run(() => show_error(main));"/>
+<input id="button2" type="button" value="Pause" style="visibility: hidden;"
+    onclick="if (pause_now) resume(); else pause();"/>
+<p>
+<div id="comment"/>
+</div>
+</div>
+
+<script src="util.js"></script>
+<script src="balance.js"></script>
+<script src="tile_lib.js"></script>
+<script src="parser.js"></script>
+<script>
+"use strict";
+
+let frame_delay = 100;
+
+let last_handled = Date.now();
+let running = false;
+let paused_handler = null;
+let pause_now = false;
+let abort_now = false;
+let empty_promise = new Promise((resolve, reject) => resolve(null));
+
+let n_handled = 0;
+
+function update() {
+    let button2 = document.getElementById("button2");
+    button2.style.visibility = (running ? "visible" : "hidden");
+    button2.value = (pause_now ? "Resume" : "Pause");
+}
+
+function handler(resolve, reject) {
+    if (abort_now) {
+        reject("Aborted");
+    } else if (pause_now) {
+        paused_handler = () => handler(resolve,reject);
+    } else {
+        resolve(null);
+        last_handled = Date.now();
+    }
+}
+
+function handle_events() {
+    n_handled += 1;
+    if ((n_handled&((1<<16)-1)) == 0)
+        console.log(n_handled + " handled");
+
+    if (!abort_now && 
+        !pause_now &&
+        Math.abs(Date.now() - last_handled) < frame_delay)
+        return empty_promise;
+
+    return new Promise((resolve, reject) => {
+        setTimeout(handler, 0, resolve, reject);
+    });
+}
+
+function handle_events_simple() {
+    return new Promise((resolve, reject) => setTimeout(resolve, 0));
+}
+
+async function pause() {
+    pause_now = true;
+    update();
+}
+
+async function resume() {
+    let handler = paused_handler;
+    pause_now = false;
+    paused_handler = null;
+    if (handler !== null)
+        handler();
+    update();
+}
+
+async function abort() {
+    pause_now = false;
+    abort_now = true;
+    resume();
+    while(running) {
+        await handle_events_simple();
+    }
+    abort_now = false;
+    
+    update();
+}
+
+async function run(func) {
+    await abort();
+    
+    console.log("Begin");
+
+    running = true;    
+    update();
+    try {
+        await func();
+    } catch(e) {
+        console.log(e);
+    }
+    running = false;    
+    
+    console.log("Ended");
+}
+
+
+
+let canvas = document.getElementById("plot");
+let comment = document.getElementById("comment");
+let ctx = canvas.getContext("2d");
+
+function draw(lang, point, tile, underlay=true, fill=true, stroke=true) {
+    let p = lang.polygon(point, tile.tile);
+
+    let fill_style;    
+    if (tile.colors.length == 1) {
+        fill_style = tile.colors[0];
+    } else if (tile.colors.length == 2) {
+        fill_style = tile.mirror ? tile.colors[1] : tile.colors[0];
+    } else {
+        let value = tile.mirror ? 0.5 : 1;
+        let angle = 1/6+(1+Math.sqrt(5))/2*tile.index;
+        let r = 128+64*value*(1+Math.cos(angle*Math.PI*2));
+        let g = 128+64*value*(1+Math.cos((angle+1/3)*Math.PI*2));
+        let b = 128+64*value*(1+Math.cos((angle+2/3)*Math.PI*2));
+        fill_style = `rgba(${r},${g},${b},1.0)`;
+    }
+    
+    ctx.beginPath();
+    ctx.moveTo(p[0][0],p[0][1]);
+    for(let i=1;i<p.length;i++) {
+        ctx.lineTo(p[i][0],p[i][1]);
+    }
+    //ctx.lineTo(p[0][0],p[0][1]);
+    ctx.closePath();
+    
+    if (underlay) {
+        ctx.strokeStyle = fill_style;
+        ctx.lineWidth = 3.0;
+        ctx.lineJoin = "bevel";
+        ctx.stroke();
+    }
+    if (fill) {
+        ctx.fillStyle = fill_style;
+        ctx.fill();
+    }
+    if (stroke && tile.border) {
+        ctx.strokeStyle = "#000000";
+        ctx.lineWidth = 1.5;
+        ctx.lineJoin = "bevel";
+        ctx.stroke();
+    }
+    
+    //tp = tx(p[0]);
+    //ctx.fillStyle = "#ff8888";
+    //ctx.fillRect(tp[0]-2,tp[1]-2,4,4)
+}
+
+
+function clear() {
+    canvas.width = canvas.scrollWidth;
+    canvas.height = canvas.scrollHeight;
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+}
+
+function draw_placements(assem, placements) {
+    let point = [ canvas.width/2, canvas.height/2, 25 ];
+    let offsets = [ point ];
+    for(let i=0;i<placements.length;i++) {
+        for(let j=placements[i].path.length-1;j>=0;j--)
+            point = assem.lang.go(point, assem.lang.reverse(placements[i].path[j]));
+        offsets[i+1] = point;
+    }
+
+    for(let i=0;i<placements.length;i++) {
+        point = offsets[i];
+        draw(assem.lang, point, assem.tiles[placements[i].tile], true, false, false);
+    }
+    for(let i=0;i<placements.length;i++) {
+        point = offsets[i];
+        draw(assem.lang, point, assem.tiles[placements[i].tile], false, true, false);
+    }
+    for(let i=0;i<placements.length;i++) {
+        point = offsets[i];
+        draw(assem.lang, point, assem.tiles[placements[i].tile], false, false, true);
+    }
+    
+    //let tp = tx([0,0]);
+    //ctx.fillStyle = "#ff8888";
+    //ctx.fillRect(tp[0]-2,tp[1]-2,4,4)
+}
+
+//draw([0,0], pattern);
+//draw_placements(placements);
+
+let spec=null, lang=null, assem=null, tiles=null;
+
+function redraw() {
+    clear();
+    if (assem !== null) {
+        //draw_placements(assem, assem.placements, true,true);
+        draw_placements(assem, assem.highwater);
+    }
+}
+
+// May need a smarter way to do this.
+function covered() {
+    let data = ctx.getImageData(0,0, ctx.canvas.width,ctx.canvas.height).data;
+    for(let i=3; i<data.length; i+=4) {
+        if (data[i] == 0) return false;
+    }
+    
+    return true;
+}
+
+
+async function show_error(func) {
+    try {
+        return await func();
+    } catch(e) {
+        comment.textContent = e.toString();
+        throw e;
+    }
+}
+
+async function main() {
+    spec = null;
+    lang = null;
+    assem = null;
+    spec = new Spec(document.getElementById("code").value);
+    
+    
+    let s2 = Math.sqrt(2);
+    //lang = new Language(8, [0,1,3,2], [0,1,3,2], [1,s2,1,s2], [1,1,s2,1/s2], [0,2,1,-1]);
+    //lang = new Language(8, [0,1], [0,1], [1,s2], [1,1], [0,2]);
+    //lang = new Language(8, [0,1],[1,s2],[1,1]);
+    //lang = new Language(8, [0,2,1,3,4],[0,1,2,4,3],[1,1,1,1,1],[1,1,1,1,1],[0,1,-1,2,-2]);
+    //lang = new Language(8, [0,1,2],[0,2,1],[1,1,1],[1,1,1],[0,2,-2]);
+    //lang = new Language(spec.angles, [1,0],[0,1],[1,1],[1,1],[1,-1]);
+    //lang = new Language(3, [0,1],[1,0],[1,1],[1,1],[2,-2]);
+    //lang = new Language(6, [0],[0],[1],[1],[0]);
+    
+    assem = spec.realize();
+    lang = assem.lang;
+    
+    while(true) {
+        /*while(true) {
+            tiles = [ ];
+            for(let i=0;i<2;i++) {
+                comment.innerHTML = "Tile "+i;
+                await handle_events();
+                tiles.push(await lang.find_good(10));
+            }
+            
+            //... but mirrors balance everything! (Subset unbalance may fix this)
+            //if (!lang.balanced(tiles)) {
+            //    console.log("Unbalanced");
+            //    continue;
+            //}
+            
+            const full_set = tiles.concat(tiles.map(tile => lang.mirror(tile)));
+            if (!lang.balanced(full_set)) {
+                console.log("Unbalanced");
+                continue;
+            }
+            
+            //let bad = false;
+            //for(const i of range(tiles.length)) {
+            //    const subset = tiles.slice(0,i).concat(tiles.slice(i+1,tiles.length));
+            //    const full_subset = subset.concat(subset.map(tile => lang.mirror(tile)));
+            //    if (lang.balanced(full_subset)) {
+            //        bad = true;
+            //        break;
+            //    }
+            //}
+            //if (bad) {
+            //    console.log("Gah");
+            //    continue;
+            //}
+            
+            break;
+        } */
+        comment.innerHTML = "Assemble";
+        
+        //assem = new Assembler(
+        //    lang, tiles, 
+        //    spec.lookahead, 
+        //    spec.rotations, 
+        //    spec.mirrors);
+            
+        let good=true;
+        while(good) {
+            //comment.innerHTML = "Lookahead: "+assem.lookahead;
+            //window.requestAnimationFrame(draw);
+            redraw();
+            if (covered()) pause();
+            await handle_events();
+            
+            let started = Date.now();
+            while(good) {
+                good = await assem.step();
+                if (Date.now() >= started+1000) break;
+            }
+        }
+    }
+}
+
+//main();
+
+window.onresize = redraw;
+redraw();
+
+</script>
+
+
